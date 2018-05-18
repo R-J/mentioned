@@ -8,7 +8,7 @@ $PluginInfo['mentioned'] = [
     'RequiredPlugins' => false,
     'RequiredTheme' => false,
     'SettingsPermission' => 'Garden.Settings.Manage',
-    'SettingsUrl' => '/settings/mentioned',
+    'SettingsUrl' => '/settings/mentioned', // ToDo: implement a "Recalc now" button
     'MobileFriendly' => true,
     'HasLocale' => true,
     'Author' => 'Robin Jurinka',
@@ -25,7 +25,9 @@ class MentionedPlugin extends Gdn_Plugin {
     public function setup() {
         $this->structure();
     }
-
+public function base_render_before($sender, $args) {
+    $this->structure();
+}
     /**
      * Change db structure.
      *
@@ -35,13 +37,18 @@ class MentionedPlugin extends Gdn_Plugin {
         // Add new table.
         Gdn::structure()
             ->table('Mentioned')
-            ->primaryKey('MentionedID')
             ->column('MentionedUserID', 'int(11)', false, 'index')
-            ->column('MentioningUserID', 'int(11)', false, 'index')
+            ->column('MentioningUserID', 'int(11)', false)
             ->column('ForeignType', ['Discussion', 'Comment', 'Activity'], false)
             ->column('ForeignID', 'int(11)', false)
             ->column('DateInserted', 'datetime')
             ->set();
+        // Construct key to ensure unique entries.
+        $px = Gdn::database()->DatabasePrefix;
+        $sql = "ALTER TABLE {$px}Mentioned";
+        $sql .= ' ADD UNIQUE KEY `UX_MentionedUserID_ForeignType_ForeignID`';
+        $sql .= ' (`MentionedUserID`, `ForeignType`, `ForeignID`)';
+        Gdn::sql()->query($sql);
 
         // Add column to profile.
         Gdn::structure()
@@ -87,24 +94,29 @@ class MentionedPlugin extends Gdn_Plugin {
     }
 
     /**
-     * Add entry to Mentioned table and increase count in User table.
+     * Add mentioned information to db.
      *
-     * @param [type] $foreignType [description]
-     * @param [type] $foreignID   [description]
-     * @param [type] $userNames   [description]
+     * @param string $foreignType One of Discussion/Comment - Activity not yet implemented
+     * @param int $foreignID The ID of the Discussion/Comment
+     * @param int $mentioningUserID The ID of the user who mentioned another user
+     * @param array $mentionedUserNames The names that are mentioned
+     * @param string $dateInserted Timestamp of the mentioning
      */
     protected function addMentioned(
         string $foreignType,
         int $foreignID,
         int $mentioningUserID,
         $mentionedUserNames,
-        $dateInserted
+        string $dateInserted = ''
     ) {
         if (!is_array($mentionedUserNames)) {
             $mentionedUserNames = (array)$mentionedUserNames;
         }
         if (count($mentionedUserNames) == 0) {
             return;
+        }
+        if ($dateinserted == '') {
+            $dateInserted = Gdn_Format::toDateTime();
         }
         $userModel = Gdn::UserModel();
 
@@ -119,8 +131,7 @@ class MentionedPlugin extends Gdn_Plugin {
                     'ForeignType' => $foreignType,
                     'ForeignID' => $foreignID,
                     'MentionedUserID' => $user->UserID,
-                    'MentioningUserID' => $mentioningUserID,
-                    'DateInserted' => Gdn_Format::toDateTime()
+                    'MentioningUserID' => $mentioningUserID
                 ]
             );
 
@@ -179,7 +190,9 @@ class MentionedPlugin extends Gdn_Plugin {
                     'ForeignType' => $foreignType,
                     'ForeignID' => $foreignID
                 ]
-            )->resultArray();
+            )
+            ->get()
+            ->resultArray();
 
         // Remove rows.
         Gdn::sql()->delete(
