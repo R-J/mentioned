@@ -64,7 +64,7 @@ class MentionedPlugin extends Gdn_Plugin {
             $args['Discussion']['DiscussionID'],
             $args['Discussion']['InsertUserID'],
             $args['MentionedUsers'],
-            $args['Discussion']['DateInserted'],
+            $args['Discussion']['DateInserted']
         );
     }
 
@@ -120,7 +120,7 @@ class MentionedPlugin extends Gdn_Plugin {
                     'ForeignID' => $foreignID,
                     'MentionedUserID' => $user->UserID,
                     'MentioningUserID' => $mentioningUserID,
-                    'DateInserted' => $dateInserted
+                    'DateInserted' => Gdn_Format::toDateTime()
                 ]
             );
 
@@ -179,8 +179,7 @@ class MentionedPlugin extends Gdn_Plugin {
                     'ForeignType' => $foreignType,
                     'ForeignID' => $foreignID
                 ]
-            )
-        )->resultArray();
+            )->resultArray();
 
         // Remove rows.
         Gdn::sql()->delete(
