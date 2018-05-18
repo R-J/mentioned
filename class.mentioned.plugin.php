@@ -3,8 +3,8 @@
 $PluginInfo['mentioned'] = [
     'Name' => 'Mentioned',
     'Description' => 'Adds a list of discussions in that a user has been mentioned to the users profile.',
-    'Version' => '0.1',
-    'RequiredApplications' => ['Vanilla' => '>= 2.2'],
+    'Version' => '0.1.0',
+    'RequiredApplications' => ['Vanilla' => '>= 2.6'],
     'RequiredPlugins' => false,
     'RequiredTheme' => false,
     'SettingsPermission' => 'Garden.Settings.Manage',
@@ -12,7 +12,7 @@ $PluginInfo['mentioned'] = [
     'MobileFriendly' => true,
     'HasLocale' => true,
     'Author' => 'Robin Jurinka',
-    'AuthorUrl' => 'http://vanillaforums.org/profile/44046/R_J',
+    'AuthorUrl' => 'https://open.vanillaforums.com/profile/r_j',
     'License' => 'MIT'
 ];
 
@@ -36,9 +36,11 @@ class MentionedPlugin extends Gdn_Plugin {
         Gdn::structure()
             ->table('Mentioned')
             ->primaryKey('MentionedID')
-            ->column('UserID', 'int(11)', false, 'index')
-            ->column('ForeignType', ['Discussion', 'Comment'], false)
+            ->column('MentionedUserID', 'int(11)', false, 'index')
+            ->column('MentioningUserID', 'int(11)', false, 'index')
+            ->column('ForeignType', ['Discussion', 'Comment', 'Activity'], false)
             ->column('ForeignID', 'int(11)', false)
+            ->column('DateInserted', 'datetime')
             ->set();
 
         // Add column to profile.
@@ -58,9 +60,11 @@ class MentionedPlugin extends Gdn_Plugin {
      */
     public function discussionModel_beforeNotification_handler($sender, $args) {
         $this->addMentioned(
-            'Comment',
-            $args['Comment']['CommentID'],
-            $args['MentionedUsers']
+            'Discussion',
+            $args['Discussion']['DiscussionID'],
+            $args['Discussion']['InsertUserID'],
+            $args['MentionedUsers'],
+            $args['Discussion']['DateInserted'],
         );
     }
 
@@ -76,7 +80,9 @@ class MentionedPlugin extends Gdn_Plugin {
         $this->addMentioned(
             'Comment',
             $args['Comment']['CommentID'],
-            $args['MentionedUsers']
+            $args['Comment']['InsertUserID'],
+            $args['MentionedUsers'],
+            $args['Comment']['DateInserted']
         );
     }
 
@@ -87,13 +93,23 @@ class MentionedPlugin extends Gdn_Plugin {
      * @param [type] $foreignID   [description]
      * @param [type] $userNames   [description]
      */
-    protected function addMentioned($foreignType, $foreignID, $userNames) {
-        $userModel = Gdn::UserModel();
-        if (!is_array($userNames)) {
-            $userNames = (array)$userNames;
+    protected function addMentioned(
+        string $foreignType,
+        int $foreignID,
+        int $mentioningUserID,
+        $mentionedUserNames,
+        $dateInserted
+    ) {
+        if (!is_array($mentionedUserNames)) {
+            $mentionedUserNames = (array)$mentionedUserNames;
         }
+        if (count($mentionedUserNames) == 0) {
+            return;
+        }
+        $userModel = Gdn::UserModel();
+
         // Loop through all users.
-        foreach ($userNames as $userName) {
+        foreach ($mentionedUserNames as $userName) {
             $user = $userModel->getByUsername($userName);
 
             // Check if line already exists.
@@ -102,7 +118,9 @@ class MentionedPlugin extends Gdn_Plugin {
                 [
                     'ForeignType' => $foreignType,
                     'ForeignID' => $foreignID,
-                    'UserID' => $user->UserID
+                    'MentionedUserID' => $user->UserID,
+                    'MentioningUserID' => $mentioningUserID,
+                    'DateInserted' => $dateInserted
                 ]
             );
 
@@ -113,7 +131,9 @@ class MentionedPlugin extends Gdn_Plugin {
                     [
                         'ForeignType' => $foreignType,
                         'ForeignID' => $foreignID,
-                        'UserID' => $user->UserID
+                        'MentionedUserID' => $user->UserID,
+                        'MentioningUserID' => $mentioningUserID,
+                        'DateInserted' => $dateInserted
                     ]
                 );
                 Gdn::sql()
@@ -146,17 +166,20 @@ class MentionedPlugin extends Gdn_Plugin {
      * @return void.
      */
     public function commentModel_deleteComment_handler($sender, $args) {
-        $this->deleteMentioned('Comment', $args['Comment']);
+        $this->deleteMentioned('Comment', $args['CommentID']);
     }
 
-    protected function deleteMentioned($foreignType, $foreignID) {
+    protected function deleteMentioned(string $foreignType, int $foreignID) {
         // Keep UserIDs for refreshing their count.
-        $userIDs = Gdn::sql()->getWhere(
-            'Mentioned',
-            [
-                'ForeignType' => $foreignType,
-                'ForeignID' => $foreignID
-            ]
+        $userIDs = Gdn::sql()
+            ->select('MentionedUserID')
+            ->from('Mentioned')
+            ->where(
+                [
+                    'ForeignType' => $foreignType,
+                    'ForeignID' => $foreignID
+                ]
+            )
         )->resultArray();
 
         // Remove rows.
@@ -165,22 +188,25 @@ class MentionedPlugin extends Gdn_Plugin {
             ['ForeignType' => $foreignType, 'ForeignID' => $foreignID]
         );
 
-        $this->refreshCount($userIDs);
+        $this->refreshCount(array_column($userIDs, 'MentionedUserID'));
     }
 
     protected function refreshCount($userIDs = []) {
+        if (count($userIDs) == 0) {
+            return;
+        }
+
+        // Build and run count query.
         $px = Gdn::database()->DatabasePrefix;
         $sql = "UPDATE {$px}User u";
         $sql .= ' SET u.CountMentioned = (';
         $sql .= '   SELECT COUNT(m.UserID)';
         $sql .= "   FROM {$px}Mentioned m";
-        $sql .= '   WHERE u.UserID = m.UserID';
+        $sql .= '   WHERE u.UserID = m.MentionedUserID';
         $sql .= ' )';
-        if (count($userIDs) > 0) {
-            $sql .= " WHERE u.UserID in ('";
-            $sql .= implode("','", $userIDs);
-            $sql .= "')";
-        }
+        $sql .= " WHERE u.UserID in ('";
+        $sql .= implode("','", $userIDs);
+        $sql .= "')";
         Gdn::sql()->query($sql);
     }
 
