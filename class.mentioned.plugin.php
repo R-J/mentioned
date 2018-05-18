@@ -25,17 +25,16 @@ class MentionedPlugin extends Gdn_Plugin {
     public function setup() {
         $this->structure();
     }
-public function base_render_before($sender, $args) {
-    $this->structure();
-}
+
     /**
      * Change db structure.
      *
      * @return void.
      */
     public function structure() {
+        $database = Gdn::database();
         // Add new table.
-        Gdn::structure()
+        $database->structure()
             ->table('Mentioned')
             ->column('MentionedUserID', 'int(11)', false, 'index')
             ->column('MentioningUserID', 'int(11)', false)
@@ -44,14 +43,14 @@ public function base_render_before($sender, $args) {
             ->column('DateInserted', 'datetime')
             ->set();
         // Construct key to ensure unique entries.
-        $px = Gdn::database()->DatabasePrefix;
+        $px = $database->DatabasePrefix;
         $sql = "ALTER TABLE {$px}Mentioned";
         $sql .= ' ADD UNIQUE KEY `UX_MentionedUserID_ForeignType_ForeignID`';
         $sql .= ' (`MentionedUserID`, `ForeignType`, `ForeignID`)';
-        Gdn::sql()->query($sql);
+        $database->sql()->query($sql);
 
         // Add column to profile.
-        Gdn::structure()
+        $database->structure()
             ->table('User')
             ->column('CountMentioned', 'int(11)', 0)
             ->set();
@@ -93,6 +92,16 @@ public function base_render_before($sender, $args) {
         );
     }
 
+public function base_render_before($sender, $args) {
+    $this->addMentioned(
+        'Comment',
+        '99',
+        '4',
+        ['Hinz', 'Kunz','System','Boss']
+    );
+}
+
+
     /**
      * Add mentioned information to db.
      *
@@ -118,26 +127,15 @@ public function base_render_before($sender, $args) {
         if ($dateinserted == '') {
             $dateInserted = Gdn_Format::toDateTime();
         }
-        $userModel = Gdn::UserModel();
+        $userModel = Gdn::userModel();
+        $database = Gdn::database();
 
         // Loop through all users.
         foreach ($mentionedUserNames as $userName) {
             $user = $userModel->getByUsername($userName);
-
-            // Check if line already exists.
-            $count = Gdn::sql()->getCount(
-                'Mentioned',
-                [
-                    'ForeignType' => $foreignType,
-                    'ForeignID' => $foreignID,
-                    'MentionedUserID' => $user->UserID,
-                    'MentioningUserID' => $mentioningUserID
-                ]
-            );
-
-            // If not, insert line and update count.
-            if ($count == 0) {
-                Gdn::sql()->insert(
+            $database->sql()
+                ->options('Ignore', true)
+                ->insert(
                     'Mentioned',
                     [
                         'ForeignType' => $foreignType,
@@ -147,7 +145,8 @@ public function base_render_before($sender, $args) {
                         'DateInserted' => $dateInserted
                     ]
                 );
-                Gdn::sql()
+            if ($database->LastInfo['RowCount'] > 0) {
+                $database->sql()
                     ->update('User')
                     ->set('CountMentioned', 'CountMentioned + 1', false)
                     ->where('UserID', $user->UserID)
@@ -275,7 +274,7 @@ public function base_render_before($sender, $args) {
         $sender->getUserInfo('', '', $userID, false);
 
         // Prepare pager.
-        $pageSize = Gdn::config('Vanilla.Discussions.PerPage', 30);
+        $pageSize = c('Vanilla.Discussions.PerPage', 30);
         if (isset($args[2])) {
             $page = $args[2];
             list($offset, $limit) = offsetLimit($page, $pageSize);
