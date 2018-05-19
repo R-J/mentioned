@@ -36,17 +36,18 @@ class MentionedPlugin extends Gdn_Plugin {
         // Add new table.
         $database->structure()
             ->table('Mentioned')
-            ->column('MentionedUserID', 'int(11)', false, 'index')
-            ->column('MentioningUserID', 'int(11)', false)
+            ->column('UserID', 'int(11)', false, 'index')
+            ->column('InsertUserID', 'int(11)', false)
             ->column('ForeignType', ['Discussion', 'Comment', 'Activity'], false)
             ->column('ForeignID', 'int(11)', false)
+            ->column('InsertUserID', 'int(11)', false)
             ->column('DateInserted', 'datetime')
-            ->set();
+            ->set(true, true);
         // Construct key to ensure unique entries.
         $px = $database->DatabasePrefix;
         $sql = "ALTER TABLE {$px}Mentioned";
-        $sql .= ' ADD UNIQUE KEY `UX_MentionedUserID_ForeignType_ForeignID`';
-        $sql .= ' (`MentionedUserID`, `ForeignType`, `ForeignID`)';
+        $sql .= ' ADD UNIQUE KEY `UX_UserID_ForeignType_ForeignID`';
+        $sql .= ' (`UserID`, `ForeignType`, `ForeignID`)';
         $database->sql()->query($sql);
 
         // Add column to profile.
@@ -92,29 +93,21 @@ class MentionedPlugin extends Gdn_Plugin {
         );
     }
 
-public function base_render_before($sender, $args) {
-    $this->addMentioned(
-        'Comment',
-        '99',
-        '4',
-        ['Hinz', 'Kunz','System','Boss']
-    );
-}
-
-
     /**
      * Add mentioned information to db.
      *
-     * @param string $foreignType One of Discussion/Comment - Activity not yet implemented
-     * @param int $foreignID The ID of the Discussion/Comment
-     * @param int $mentioningUserID The ID of the user who mentioned another user
-     * @param array $mentionedUserNames The names that are mentioned
-     * @param string $dateInserted Timestamp of the mentioning
+     * @param string $foreignType        One of Discussion/Comment - Activity not yet implemented
+     * @param int    $foreignID          The ID of the Discussion/Comment
+     * @param int    $insertUserID   The ID of the user who mentioned another user
+     * @param array  $mentionedUserNames The names that are mentioned
+     * @param string $dateInserted       Timestamp of the mentioning
+     *
+     * @return  void
      */
     protected function addMentioned(
         string $foreignType,
         int $foreignID,
-        int $mentioningUserID,
+        int $insertUserID,
         $mentionedUserNames,
         string $dateInserted = ''
     ) {
@@ -140,8 +133,8 @@ public function base_render_before($sender, $args) {
                     [
                         'ForeignType' => $foreignType,
                         'ForeignID' => $foreignID,
-                        'MentionedUserID' => $user->UserID,
-                        'MentioningUserID' => $mentioningUserID,
+                        'UserID' => $user->UserID,
+                        'InsertUserID' => $insertUserID,
                         'DateInserted' => $dateInserted
                     ]
                 );
@@ -159,7 +152,7 @@ public function base_render_before($sender, $args) {
      * Clean up if discussion is deleted.
      *
      * @param discussionModel $sender Sending controller instance.
-     * @param array $args Event arguments.
+     * @param array           $args   Event arguments.
      *
      * @return void.
      */
@@ -171,7 +164,7 @@ public function base_render_before($sender, $args) {
      * Clean up if comment is deleted.
      *
      * @param commentModel $sender Sending controller instance.
-     * @param array $args Event arguments.
+     * @param array        $args   Event arguments.
      *
      * @return void.
      */
@@ -179,10 +172,18 @@ public function base_render_before($sender, $args) {
         $this->deleteMentioned('Comment', $args['CommentID']);
     }
 
+    /**
+     * Clear the mentioned table from post related entries.
+     *
+     * @param string $foreignType One of Discussion/Comment - Activity not yet implemented
+     * @param int    $foreignID   The ID of the Discussion/Comment
+     *
+     * @return void.
+     */
     protected function deleteMentioned(string $foreignType, int $foreignID) {
         // Keep UserIDs for refreshing their count.
         $userIDs = Gdn::sql()
-            ->select('MentionedUserID')
+            ->select('UserID')
             ->from('Mentioned')
             ->where(
                 [
@@ -199,9 +200,16 @@ public function base_render_before($sender, $args) {
             ['ForeignType' => $foreignType, 'ForeignID' => $foreignID]
         );
 
-        $this->refreshCount(array_column($userIDs, 'MentionedUserID'));
+        $this->refreshCount(array_column($userIDs, 'UserID'));
     }
 
+    /**
+     * Refresh the CountMentioned field in user table.
+     *
+     * @param array $userIDs Users to be refreshed.
+     *
+     * @return void
+     */
     protected function refreshCount($userIDs = []) {
         if (count($userIDs) == 0) {
             return;
@@ -213,7 +221,7 @@ public function base_render_before($sender, $args) {
         $sql .= ' SET u.CountMentioned = (';
         $sql .= '   SELECT COUNT(m.UserID)';
         $sql .= "   FROM {$px}Mentioned m";
-        $sql .= '   WHERE u.UserID = m.MentionedUserID';
+        $sql .= '   WHERE u.UserID = m.UserID';
         $sql .= ' )';
         $sql .= " WHERE u.UserID in ('";
         $sql .= implode("','", $userIDs);
@@ -241,12 +249,12 @@ public function base_render_before($sender, $args) {
 
     /**
      * Build "Mentioned" view in profile.
-     * 
+     *
      * Add new view in profile showing all comments and discussions where a
      * user has been mentioned.
      *
      * @param profileController $sender Sending controller instance.
-     * @param array $args Event arguments.
+     * @param array             $args   Event arguments.
      *
      * @return void.
      */
@@ -267,11 +275,11 @@ public function base_render_before($sender, $args) {
 
         // Set the current profile user.
         if (!isset($args[0])) {
-            $userID = Gdn::session()->UserID;
+            $sender->getUserInfo('', '', Gdn::session()->UserID, false);
         } else {
-            $userID = intval($args[0]);
+            $sender->getUserInfo($args[0], '', '', false);
         }
-        $sender->getUserInfo('', '', $userID, false);
+        $userID = $sender->User->UserID;
 
         // Prepare pager.
         $pageSize = c('Vanilla.Discussions.PerPage', 30);
@@ -284,7 +292,7 @@ public function base_render_before($sender, $args) {
             $limit = $pageSize;
         }
 
-        $mentionedModel = new MentionedModel();
+        $mentionedModel = new Gdn_Model('Mentioned');
         $wheres = ['UserID' => $userID];
         $perms = DiscussionModel::categoryPermissions();
         if (is_array($perms)) {
@@ -312,8 +320,10 @@ public function base_render_before($sender, $args) {
             $sender->View = 'mentioned';
         }
 
-        $mentioned = $mentionedModel->getByUserID(
-            $userID,
+        $mentioned = $mentionedModel->getWhere(
+            ['UserID' => $userID],
+            '',
+            '',
             $limit,
             $offset
         );
@@ -325,7 +335,7 @@ public function base_render_before($sender, $args) {
 
         $sender->setTabView(
             t('Mentioned'),
-            $this->getView('profile.php')
+            $sender->fetchViewLocation('profile', '', 'plugins/mentioned')
         );
 
         $sender->render();
