@@ -32,23 +32,26 @@ class MentionedPlugin extends Gdn_Plugin {
      * @return void.
      */
     public function structure() {
-        $database = Gdn::database();
         // Add new table.
+        $database = Gdn::database();
         $database->structure()
             ->table('Mentioned')
+            ->column('ForeignType', ['Discussion', 'Comment'], false)
+            ->column('ForeignID', 'int(11)', false)
             ->column('UserID', 'int(11)', false, 'index')
             ->column('InsertUserID', 'int(11)', false)
-            ->column('ForeignType', ['Discussion', 'Comment', 'Activity'], false)
-            ->column('ForeignID', 'int(11)', false)
-            ->column('InsertUserID', 'int(11)', false)
             ->column('DateInserted', 'datetime')
-            ->set(true, true);
+            ->set();
+
         // Construct key to ensure unique entries.
         $px = $database->DatabasePrefix;
         $sql = "ALTER TABLE {$px}Mentioned";
         $sql .= ' ADD UNIQUE KEY `UX_UserID_ForeignType_ForeignID`';
         $sql .= ' (`UserID`, `ForeignType`, `ForeignID`)';
-        $database->sql()->query($sql);
+        try {
+            $database->sql()->query($sql);
+        } catch (Exception $e) {
+        }
 
         // Add column to profile.
         $database->structure()
@@ -96,9 +99,9 @@ class MentionedPlugin extends Gdn_Plugin {
     /**
      * Add mentioned information to db.
      *
-     * @param string $foreignType        One of Discussion/Comment - Activity not yet implemented
+     * @param string $foreignType        One of Discussion/Comment
      * @param int    $foreignID          The ID of the Discussion/Comment
-     * @param int    $insertUserID   The ID of the user who mentioned another user
+     * @param int    $insertUserID       The ID of the user who mentioned another user
      * @param array  $mentionedUserNames The names that are mentioned
      * @param string $dateInserted       Timestamp of the mentioning
      *
@@ -175,7 +178,7 @@ class MentionedPlugin extends Gdn_Plugin {
     /**
      * Clear the mentioned table from post related entries.
      *
-     * @param string $foreignType One of Discussion/Comment - Activity not yet implemented
+     * @param string $foreignType One of Discussion/Comment
      * @param int    $foreignID   The ID of the Discussion/Comment
      *
      * @return void.
@@ -237,12 +240,24 @@ class MentionedPlugin extends Gdn_Plugin {
      * @return void.
      */
     public function profileController_addProfileTabs_handler($sender) {
-        if (is_object($sender->User) && $sender->User->UserID > 0) {
+
+
+
+            // Add the article tab
+
+        if (is_object($sender->User) && $sender->User->CountMentioned > 0 && $sender->User->UserID > 0) {
+            $mentionedLabel = sprite('SpMentioned').' '.t('Mentioned');
+            if (c('mentioned.Profile.ShowCounts', true)) {
+                $mentionedLabel .= '<span class="Aside">'.countString(
+                    $sender->User->CountMentioned,
+                    "/profile/count/mentioned?userid={$sender->User->UserID}"
+                ).'</span>';
+            }
             $sender->addProfileTab(
                 t('Mentioned'),
                 userUrl($sender->User, '', 'mentioned'),
                 'MentionedTab',
-                '<span class="Sprite SpMentioned"></span> '.t('Mentioned')
+                $mentionedLabel
             );
         }
     }
@@ -281,61 +296,133 @@ class MentionedPlugin extends Gdn_Plugin {
         }
         $userID = $sender->User->UserID;
 
-        // Prepare pager.
-        $pageSize = c('Vanilla.Discussions.PerPage', 30);
-        if (isset($args[2])) {
-            $page = $args[2];
-            list($offset, $limit) = offsetLimit($page, $pageSize);
+
+
+        $totalRecords = $sender->User->CountMentioned;
+        // "Fake" data if most probably there is no data in the db, do all the
+        // heavy work otherwise.
+        if (!$totalRecords) {
+            $mentioned = (object)[];
         } else {
-            $page = '';
-            $offset = 0;
-            $limit = $pageSize;
+            // Prepare pager.
+            $pageSize = c('Vanilla.Discussions.PerPage', 30);
+            if (isset($args[2])) {
+                $page = $args[2];
+                list($offset, $limit) = offsetLimit($page, $pageSize);
+            } else {
+                $page = '';
+                $offset = 0;
+                $limit = $pageSize;
+            }
+
+            // Build a pager
+            $pagerFactory = new Gdn_PagerFactory();
+            $sender->Pager = $pagerFactory->getPager('MorePager', $sender);
+            $sender->Pager->MoreCode = 'More Posts';
+            $sender->Pager->LessCode = 'Newer Posts';
+            $sender->Pager->ClientID = 'Pager';
+            $sender->Pager->configure(
+                $offset,
+                $limit,
+                $totalRecords,
+                userUrl($sender->User, '', 'mentioned').'?page={Page}'
+            );
+
+            // Deliver JSON data if necessary
+            if ($sender->deliveryType() != DELIVERY_TYPE_ALL && $offset > 0) {
+                $sender->setJson('LessRow', $sender->Pager->toString('less'));
+                $sender->setJson('MoreRow', $sender->Pager->toString('more'));
+                $sender->View = 'mentioned';
+            }
+
+            $wheres = ['m.UserID' => $userID];
+            $perms = DiscussionModel::categoryPermissions();
+            if (is_array($perms)) {
+                $wheres['d.CategoryID'] = $perms;
+            }
+
+            // Needs two queries to get Comments and Discussions
+            $query = Gdn::sql()
+                ->select('m.ForeignID AS PrimaryID, m.ForeignType AS RecordType')
+                ->select('d.Name AS Title, d.Body AS Summary, d.Format, d.CategoryID')
+                ->select('d.InsertUserID AS UserID, d.DateInserted')
+                ->from('Mentioned m')
+                ->join(
+                    'Discussion d',
+                    "m.ForeignType = 'Discussion' and m.ForeignID = d.DiscussionID",
+                    'left'
+                )
+                ->where($wheres)
+            ->getSelect();
+            $discussionQuery = Gdn::sql()->applyParameters($query);
+            Gdn::sql()->reset();
+
+            $query = Gdn::sql()
+                ->select('m.ForeignID AS PrimaryID, m.ForeignType AS RecordType')
+                ->select('d.Name AS Title, c.Body AS Summary, c.Format, d.CategoryID')
+                ->select('c.InsertUserID AS UserID, c.DateInserted')
+                ->from('Mentioned m')
+                ->join(
+                    'Comment c',
+                    "m.ForeignType = 'Comment' and m.ForeignID = c.CommentID",
+                    'left'
+                )
+                ->join(
+                    'Discussion d',
+                    'c.DiscussionID = d.DiscussionID',
+                    'left'
+                )
+                ->where($wheres)
+            ->getSelect();
+            $commentQuery = Gdn::sql()->applyParameters($query);
+            Gdn::sql()->reset();
+
+            $mentionedQuery = "$discussionQuery\nUNION\n$commentQuery\nORDER BY DateInserted";
+            if ($limit) {
+                $mentionedQuery .= "\nLIMIT $limit";
+            }
+            if ($offset) {
+                $mentionedQuery .= "\nOFFSET $offset";
+            }
+            $mentioned = Gdn::sql()->query($mentionedQuery)->resultArray();
+            Gdn::userModel()->joinUsers($mentioned, ['UserID']);
+            foreach ($mentioned as $key => $row) {
+                // Create the summary.
+                $mentioned[$key]['Summary'] = condense(
+                    Gdn_Format::to($row['Summary'], $row['Format'])
+                );
+
+                $row['Summary'] = searchExcerpt(
+                    htmlspecialchars(
+                        Gdn_Format::plainText($row['Summary'], $row['Format'])
+                    ),
+                    '@'.$sender->User->Name
+                );
+                $mentioned[$key]['Summary'] = Emoji::instance()->translateToHtml($row['Summary']);
+                $mentioned[$key]['Format'] = 'Html';
+
+                // Add the post url.
+                if ($row['RecordType'] == 'Comment') {
+                    $url = commentUrl(['CommentID' => $row['PrimaryID']]);
+                } else {
+                    $url = discussionUrl([
+                        'DiscussionID' => $row['PrimaryID'],
+                        'Name' =>  $row['Title']
+                    ]);
+                }
+                $mentioned[$key]['Url'] = $url;
+            }
         }
-
-        $mentionedModel = new Gdn_Model('Mentioned');
-        $wheres = ['UserID' => $userID];
-        $perms = DiscussionModel::categoryPermissions();
-        if (is_array($perms)) {
-            $wheres['CategoryID'] = $perms;
-        }
-        $totalRecords = $mentionedModel->getCount($wheres);
-
-        // Build a pager
-        $pagerFactory = new Gdn_PagerFactory();
-        $sender->Pager = $pagerFactory->getPager('MorePager', $sender);
-        $sender->Pager->MoreCode = 'More Posts';
-        $sender->Pager->LessCode = 'Newer Posts';
-        $sender->Pager->ClientID = 'Pager';
-        $sender->Pager->configure(
-            $offset,
-            $limit,
-            $totalRecords,
-            userUrl($sender->User, '', 'mentioned').'?page={Page}'
-        );
-
-        // Deliver JSON data if necessary
-        if ($sender->deliveryType() != DELIVERY_TYPE_ALL && $offset > 0) {
-            $sender->setJson('LessRow', $sender->Pager->toString('less'));
-            $sender->setJson('MoreRow', $sender->Pager->toString('more'));
-            $sender->View = 'mentioned';
-        }
-
-        $mentioned = $mentionedModel->getWhere(
-            ['UserID' => $userID],
-            '',
-            '',
-            $limit,
-            $offset
-        );
 
         // Initiate view informations.
         $sender->_setBreadcrumbs(t('Mentioned'), userUrl($sender->User, '', 'Mentioned'));
-        $sender->setData('Mentioned', $mentioned);
+        $sender->setData('SearchResults', $mentioned);
+        $sender->setData('RecordCount', $totalRecords);
         $sender->setData('TabTitle', t('Mentioned'));
 
         $sender->setTabView(
             t('Mentioned'),
-            $sender->fetchViewLocation('profile', '', 'plugins/mentioned')
+            $sender->fetchViewLocation('results', 'search', 'dashboard')
         );
 
         $sender->render();
